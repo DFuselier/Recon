@@ -1,0 +1,444 @@
+# ASM Enterprise — Attack Surface Management Script
+
+**Based on:** Enterprise Financial Services ASM SOP v1.0  
+**Language:** Python 3.9+  
+**Platform:** Kali Linux (recommended), Ubuntu 22.04+
+
+> **FOR AUTHORIZED SECURITY ASSESSMENTS ONLY.**  
+> Ensure written authorization from an appropriate executive before running any active phases.  
+> Unauthorized scanning may violate the Computer Fraud and Abuse Act (CFAA) and equivalent laws.
+
+---
+
+## Table of Contents
+
+1. [What This Script Does](#what-this-script-does)
+2. [What Is NOT Automated](#what-is-not-automated)
+3. [Requirements Overview](#requirements-overview)
+4. [Full Installation (Kali Linux)](#full-installation-kali-linux)
+5. [API Key Setup](#api-key-setup)
+6. [Usage](#usage)
+7. [Phase Reference](#phase-reference)
+8. [Output Structure](#output-structure)
+9. [Interpreting Key Findings](#interpreting-key-findings)
+10. [Tips for M&A Day-Zero Sprint](#tips-for-ma-day-zero-sprint)
+
+---
+
+## What This Script Does
+
+`asm_enterprise.py` automates 12 of the 14 phases defined in the Enterprise Financial Services ASM SOP. At runtime you choose which phases to run and the script:
+
+- Prompts you for: root domains, IP/CIDR ranges, org name, ASN, GitHub org handle, and API keys
+- Presents a numbered phase menu -- run all at once or cherry-pick
+- Executes each selected phase in sequence, invoking the appropriate tools
+- Writes all output to a timestamped directory: `output/<domain>_<YYYYMMDD_HHMMSS>/`
+- Generates a consolidated `SUMMARY_REPORT.json` at the end
+
+**Active phases** (3, 5, 6, 7, 8, 9, 10, 11) send network requests to targets. The script will ask for explicit authorization confirmation before any active scanning.
+
+---
+
+## What Is NOT Automated
+
+| Phase / Feature | Reason | Manual Action |
+|---|---|---|
+| **Phase 12 -- Third-Party & Supply Chain** | Vendor/SaaS lists cannot be enumerated externally | Request procurement records and OAuth consent logs from target IT |
+| **Phase 13 -- M&A Pre-Acquisition** | Composite of other phases in passive-only mode | Run Phases 2, 3, 6, 7, 9, 10, 11 and decline all active scanning prompts |
+| **Dark Web / Flashpoint** | Requires enterprise license + API key | Configure keyword Collections in Flashpoint portal within 24hr of deal close |
+| **Cloud Posture w/ Credentials (ScoutSuite/Prowler)** | Requires provisioned cloud credentials | `prowler aws -g cis_level2` or `python3 scout.py aws` once keys are available |
+| **SOAR / PagerDuty / ServiceNow integration** | Platform-specific tokens + webhook config | Use `notify` tool: `cat findings.txt \| notify -provider slack` |
+| **HaveIBeenPwned Enterprise domain API** | Paid API key required | Public breach list IS checked; add `hibp_api_key` to config for domain-level data |
+| **DeHashed / IntelX / SecurityTrails** | Paid subscriptions | Subscribe and add API keys; integrate manually into downstream queries |
+| **IMDSv2 enforcement** | Requires AWS credentials + console access | `aws ec2 modify-instance-metadata-options --instance-id i-xxx --http-tokens required` |
+
+---
+
+## Requirements Overview
+
+### Python Libraries (pip3)
+
+| Library | Purpose | Required? |
+|---|---|---|
+| `requests` | HTTP queries: crt.sh, ARIN, ipinfo.io, HIBP, CISA KEV | YES |
+| `dnspython` | DNS resolution, AXFR, CNAME analysis | YES |
+| `rich` | Terminal UI | YES |
+| `shodan` | Shodan API integration | YES (for Phases 2, 4, 5, 9) |
+| `censys` | Censys API integration | YES (for Phases 2, 5) |
+| `certstream` | Real-time CT log monitoring | YES (for Phase 14 only) |
+
+### System / External Tools (installed separately)
+
+| Tool | Used In | Install Command |
+|---|---|---|
+| `subfinder` | Phase 3 | `go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest` |
+| `amass` | Phase 3 | `apt install amass` or `snap install amass` |
+| `puredns` | Phase 3 | `go install github.com/d3mondev/puredns/v2@latest` |
+| `dnsx` | Phase 3 | `go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest` |
+| `massdns` | Phase 3, 4 | `apt install massdns` |
+| `dnsrecon` | Phase 3 | `apt install dnsrecon` |
+| `masscan` | Phase 5 | `apt install masscan` |
+| `nmap` | Phase 5 | `apt install nmap` (pre-installed on Kali) |
+| `httpx` | Phase 6 | `go install github.com/projectdiscovery/httpx/cmd/httpx@latest` |
+| `tlsx` | Phase 6 | `go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest` |
+| `nuclei` | Phases 7, 8, 10, 11 | `go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest` |
+| `subjack` | Phase 7 | `go install github.com/haccer/subjack@latest` |
+| `whatweb` | Phase 8 | `apt install whatweb` |
+| `gau` | Phase 8 | `go install github.com/lc/gau/v2/cmd/gau@latest` |
+| `cloud_enum` | Phase 9 | See below |
+| `trufflehog` | Phase 11 | See below |
+| `gitleaks` | Phase 11 | `apt install gitleaks` |
+
+**The script gracefully skips any tool that is not installed.** It will warn you and continue. You do not need every tool installed for the script to run -- just the ones relevant to your selected phases.
+
+---
+
+## Full Installation (Kali Linux)
+
+### Step 1 -- Update and install system tools
+
+```bash
+sudo apt update && sudo apt upgrade -y
+
+# Core tools (most pre-installed on Kali)
+sudo apt install -y \
+    python3 python3-pip \
+    nmap masscan massdns \
+    amass dnsrecon whatweb \
+    whois curl jq git \
+    gitleaks
+
+# Verify Python version (need 3.9+)
+python3 --version
+```
+
+### Step 2 -- Install Go (required for ProjectDiscovery tools)
+
+```bash
+# Check if Go is already installed
+go version
+
+# If not installed:
+wget https://go.dev/dl/go1.22.4.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.22.4.linux-amd64.tar.gz
+echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
+source ~/.bashrc
+go version
+```
+
+### Step 3 -- Install ProjectDiscovery tools
+
+```bash
+# subfinder
+go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+
+# httpx
+go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+
+# dnsx
+go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+
+# nuclei
+go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+
+# tlsx
+go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest
+
+# puredns
+go install github.com/d3mondev/puredns/v2@latest
+
+# subjack
+go install github.com/haccer/subjack@latest
+
+# gau
+go install github.com/lc/gau/v2/cmd/gau@latest
+
+# Update Nuclei templates immediately after install
+nuclei -update-templates
+
+# Verify all are in PATH
+for tool in subfinder httpx dnsx nuclei tlsx puredns subjack gau; do
+    which $tool && echo "$tool: OK" || echo "$tool: MISSING"
+done
+```
+
+### Step 4 -- Install cloud_enum
+
+```bash
+cd /opt
+git clone https://github.com/initstring/cloud_enum
+cd cloud_enum
+pip3 install -r requirements.txt
+sudo ln -s /opt/cloud_enum/cloud_enum.py /usr/local/bin/cloud_enum
+chmod +x /opt/cloud_enum/cloud_enum.py
+```
+
+### Step 5 -- Install trufflehog
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+  | sudo sh -s -- -b /usr/local/bin
+trufflehog --version
+```
+
+### Step 6 -- Install Python dependencies for this script
+
+```bash
+cd /path/to/asm_enterprise
+pip3 install -r requirements.txt
+
+# Verify key libraries loaded
+python3 -c "import requests, dns, rich, shodan, censys, certstream; print('All core libs OK')"
+```
+
+### Step 7 -- Clone this script
+
+```bash
+git clone <your-repo>  # or just copy asm_enterprise.py to your working directory
+cd asm_enterprise
+chmod +x asm_enterprise.py
+```
+
+### Optional -- Install ScoutSuite and Prowler (for Phase 9 authenticated cloud assessment)
+
+```bash
+# ScoutSuite
+pip3 install scoutsuite
+
+# Prowler
+pip3 install prowler
+# or
+git clone https://github.com/prowler-cloud/prowler
+cd prowler && pip3 install .
+```
+
+---
+
+## API Key Setup
+
+API keys can be provided interactively at runtime (hidden input) or via environment variables. Environment variables are recommended to avoid entering them each run.
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export SHODAN_API_KEY="your_shodan_api_key_here"
+export CENSYS_API_ID="your_censys_api_id_here"
+export CENSYS_API_SECRET="your_censys_api_secret_here"
+
+source ~/.bashrc
+```
+
+**Where to obtain keys:**
+
+| API | URL | Notes |
+|---|---|---|
+| Shodan | https://account.shodan.io | Free tier available; paid plan needed for full org queries |
+| Censys | https://search.censys.io/account | Free research API available with registration |
+
+---
+
+## Usage
+
+```bash
+# Basic run
+python3 asm_enterprise.py
+
+# With environment variables pre-set
+SHODAN_API_KEY="xxx" CENSYS_API_ID="yyy" CENSYS_API_SECRET="zzz" python3 asm_enterprise.py
+```
+
+The script will prompt for:
+
+1. **Root domains** -- e.g. `target.com,subsidiary.com`
+2. **IP/CIDR ranges** -- e.g. `203.0.113.0/24,198.51.100.0/24` (or press ENTER to skip)
+3. **Organization name** -- exact string as it appears in WHOIS/certificates, e.g. `First National Bank Corporation`
+4. **ASN** -- e.g. `AS12345` (or press ENTER to skip)
+5. **GitHub org handle** -- e.g. `firstnationalbank` (for Phase 11 secret scanning)
+6. **Shodan API key** (or pre-set via env var)
+7. **Censys API ID + Secret** (or pre-set via env var)
+
+Then the phase menu appears. Enter:
+- `all` -- run every available phase
+- `1,2,3,6,7` -- run specific phases
+- `info` -- see what cannot be automated and why
+
+### Example -- M&A Day-Zero Sprint (passive only)
+
+When assessing a newly acquired company in the first 24 hours, run passive phases only:
+
+```
+Select phases: 1,2,3,6,7,9,10,11
+```
+
+When Phase 5 prompts for active scan authorization, decline. This ensures you conduct only passive enumeration appropriate for early-stage integration.
+
+### Example -- Full active assessment of owned infrastructure
+
+```
+Select phases: all
+```
+
+Confirm authorization when prompted for Phase 5 active scanning.
+
+---
+
+## Phase Reference
+
+| # | Phase | Key Tools | Output Files |
+|---|---|---|---|
+| 1 | Seed Data Collection | whois, ARIN API, ipinfo.io, Wayback | `seed_data.json`, `whois_*.txt`, `asn_prefixes.txt` |
+| 2 | CT & Passive Recon | crt.sh API, Censys API, Shodan API | `crtsh_*.json`, `ct_subdomains.txt`, `censys_hosts_*.json` |
+| 3 | Active DNS | subfinder, amass, puredns, dnsx, dnsrecon | `all_subdomains_raw.txt`, `resolved_subdomains.txt`, `dnsx_resolved.txt` |
+| 4 | IP & ASN | massdns, whois RADB, ipinfo.io, Shodan | `all_ips.txt`, `ptr_results.txt`, `asn_cidrs.txt` |
+| 5 | Scanning | Shodan/Censys passive, masscan, nmap | `masscan_results.json`, `open_ports.txt`, `nmap_web.*` |
+| 6 | Validation | httpx, tlsx, dnspython CAA checks | `httpx_results.json`, `tlsx_results.json`, `cert_findings.json` |
+| 7 | Takeover Detection | nuclei, subjack, dnspython CNAME | `nuclei_takeovers.txt`, `dangling_cnames.json` |
+| 8 | Web Fingerprinting | whatweb, nuclei, gau | `whatweb_results.json`, `header_analysis.json`, `js_urls_*.txt` |
+| 9 | Cloud Discovery | cloud_enum, S3 HEAD checks, Shodan | `bucket_permutations.txt`, `s3_findings.json` |
+| 10 | Vulnerability Analysis | nuclei (CVE/exposure/default-logins), CISA KEV API | `cve_findings.txt`, `kev_hits.json`, `exposure_findings.txt` |
+| 11 | Leak Monitoring | trufflehog, gitleaks, HIBP API, nuclei | `trufflehog_*.json`, `gitleaks_report.json`, `hibp_*.json` |
+| 14 | CertStream Monitor | certstream WebSocket | `cert_alerts.jsonl` (live, runs until Ctrl+C) |
+
+---
+
+## Output Structure
+
+All outputs are written to:
+
+```
+output/
+  target.com_20250407_143022/
+    SUMMARY_REPORT.json         <- Consolidated findings across all phases
+    scope_domains.txt           <- Fallback scope file
+    phase1_seed/
+      seed_data.json
+      whois_target.com.txt
+      arin_search.json
+      asn_12345_ipinfo.json
+      asn_prefixes.txt
+      radb_AS12345.txt
+    phase2_ct/
+      crtsh_target.com_%.json
+      crtsh_by_org.json
+      censys_hosts_target.com.json
+      shodan_ssl_target.com.json
+      ct_subdomains.txt          <- KEY FILE: all CT-discovered subdomains
+    phase3_dns/
+      subfinder_target.com.txt
+      amass_target.com.txt
+      AXFR_SUCCESS_*.txt         <- Only exists if AXFR succeeded (critical finding)
+      all_subdomains_raw.txt
+      resolved_subdomains.txt    <- KEY FILE: live DNS-confirmed subdomains
+      dnsx_resolved.txt          <- A/CNAME breakdown per subdomain
+      resolvers.txt
+    phase4_asn/
+      all_ips.txt
+      ptr_results.txt
+      asn_AS12345_full.json
+      asn_cidrs.txt
+    phase5_scanning/
+      shodan_net_*.json
+      shodan_admin_panels.json
+      masscan_results.json
+      open_ports.txt
+      nmap_web.{nmap,gnmap,xml}
+      nmap_tls.{nmap,gnmap,xml}
+      nmap_smb.{nmap,gnmap,xml}
+    phase6_validation/
+      httpx_results.json         <- KEY FILE: all live web hosts + metadata
+      httpx_takeover_candidates.json
+      auth_interfaces.txt
+      live_hosts.txt
+      tlsx_results.json
+      cert_findings.json         <- Expired/self-signed/unexpected issuer certs
+    phase7_takeover/
+      nuclei_takeovers.txt       <- KEY FILE: confirmed takeover candidates
+      subjack_results.txt
+      dangling_cnames.json       <- KEY FILE: CNAME chain analysis results
+    phase8_fingerprint/
+      whatweb_results.json
+      nuclei_technologies.txt
+      nuclei_api_exposure.txt
+      header_analysis.json
+      js_urls_*.txt
+    phase9_cloud/
+      bucket_permutations.txt
+      cloud_enum_results.txt
+      s3_findings.json           <- KEY FILE: public/existing S3 buckets
+      shodan_kubernetes.json
+      shodan_docker_api.json
+    phase10_vulns/
+      cve_findings.txt           <- KEY FILE: CVE detections
+      kev_hits.json              <- KEY FILE: CVEs in CISA KEV (P0/P1 escalation)
+      exposure_findings.txt
+      default_logins.txt
+      misconfig_findings.txt
+      exposed_panels.txt
+      cisa_kev.json
+    phase11_leaks/
+      trufflehog_*.json          <- KEY FILE: verified secrets in GitHub repos
+      gitleaks_report.json
+      hibp_*.json
+      github_dorks.txt
+      nuclei_tokens.txt
+    phase14_certstream/
+      cert_alerts.jsonl          <- Append-only JSONL of new cert events
+```
+
+---
+
+## Interpreting Key Findings
+
+### Immediate Escalations (P0 -- 24 hours)
+
+| Finding | Location | Action |
+|---|---|---|
+| `AXFR_SUCCESS_*.txt` exists | `phase3_dns/` | DNS misconfiguration -- restrict AXFR to authorized transfer IPs immediately |
+| `kev_hits.json` has entries | `phase10_vulns/` | CVE in CISA KEV on internet-facing asset -- patch or isolate within 24 hours |
+| `dangling_cnames.json` with `NXDOMAIN` status | `phase7_takeover/` | Confirm manually; remove dangling DNS record within 24 hours |
+| `s3_findings.json` with `PUBLIC` access | `phase9_cloud/` | Enable S3 Block Public Access immediately; check bucket contents for sensitive data |
+| `trufflehog_*.json` has verified entries | `phase11_leaks/` | Rotate every exposed credential immediately; assess blast radius |
+| Cert with Let's Encrypt on auth subdomain | `phase14_certstream/` | Investigate for active takeover; check CNAME chain |
+
+### High Priority (P1 -- 72 hours)
+
+| Finding | Location | Action |
+|---|---|---|
+| `nuclei_takeovers.txt` has entries | `phase7_takeover/` | Manual validate then escalate |
+| `default_logins.txt` has entries | `phase10_vulns/` | Change credentials immediately |
+| `exposed_panels.txt` has entries | `phase10_vulns/` | Restrict to VPN/allowlist |
+| `cors_wildcard` in `header_analysis.json` | `phase8_fingerprint/` | Restrict CORS to specific origins on financial data APIs |
+| `shodan_docker_api.json` or `shodan_kubernetes.json` | `phase9_cloud/` | Immediate firewall rule; authenticate API endpoint |
+| Expired certs on customer-facing services | `phase6_validation/cert_findings.json` | PCI-DSS / NY DFS 500 compliance issue -- renew immediately |
+
+---
+
+## Tips for M&A Day-Zero Sprint
+
+Per the SOP's Day-Zero 24-Hour Checklist:
+
+1. **Run Phases 1, 2, 3 immediately** -- CT log + passive DNS gives you 80% of the subdomain estate in minutes, entirely passively.
+
+2. **Phase 7 first, before anything else active** -- Subdomain takeovers can be found passively and are the highest-impact/lowest-cost finding. Check them before the acquired company's IT team does.
+
+3. **Phase 9 (S3 buckets) is often the fastest path to a deal-material finding** -- Public S3 buckets with customer financial data must be disclosed to Legal immediately; it may constitute a GLBA breach notification event.
+
+4. **Phase 11 (trufflehog)** -- Run this against the acquired GitHub org as soon as you have the org handle. A verified secret found here may require immediate credential rotation as a closing condition.
+
+5. **Phase 14 (CertStream)** -- Start this in a separate terminal session and leave it running during integration. Any Let's Encrypt cert issued for a monitored subdomain while dangling CNAMEs exist is strong evidence of an in-progress takeover.
+
+6. **Do NOT run Phase 5 active scanning** against an acquired entity until you have explicit written authorization from their CISO or CTO. The deal may not grant you that right automatically.
+
+---
+
+## Legal Reminder
+
+This tool is intended for:
+- Security professionals conducting authorized penetration tests
+- Internal red teams assessing their own organization's infrastructure
+- Security engineers performing M&A due diligence with appropriate authorization
+
+**Use against systems you do not own or have explicit written authorization to test is illegal.**
+
+---
+
+*End of README*
