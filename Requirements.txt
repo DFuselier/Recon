@@ -1,0 +1,19 @@
+# asm_recon.py -- Light-Active ASM Reconnaissance Script
+# Install: pip3 install -r requirements.txt
+
+# ── Core (required) ───────────────────────────────────────────────────────────
+requests>=2.31.0       # HTTP queries: crt.sh, ARIN, HIBP, CISA KEV, robots.txt, favicon, JS files
+dnspython>=2.4.2       # DNS resolution, AXFR, CNAME chain analysis, SPF/DMARC/MX lookups
+rich>=13.7.0           # Terminal UI: panels, tables, progress spinners
+
+# ── API integrations (required for full functionality) ────────────────────────
+shodan>=1.31.0         # Shodan API: SSL certs, org/ASN/IP queries, favicon hash search
+censys>=2.2.12         # Censys API: certificate and host correlation
+
+# ── Certificate monitoring (Phase 11) ────────────────────────────────────────
+certstream>=1.11       # Real-time CT log WebSocket streaming (certstream.calidog.io)
+websocket-client>=1.6.4  # WebSocket client dependency for certstream
+
+# ── Favicon hash (Phase 8 -- optional but recommended) ───────────────────────
+mmh3>=4.0.0            # MurmurHash3 for Shodan-compatible favicon hash computation
+                       # Falls back to MD5 if not installed (less accurate for Shodan queries)
