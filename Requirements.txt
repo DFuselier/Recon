@@ -1,19 +1,117 @@
-# asm_recon.py -- Light-Active ASM Reconnaissance Script
-# Install: pip3 install -r requirements.txt
+# ASM Enterprise v2.0 -- Python Dependencies
+# Install: pip3 install -r requirements.txt --break-system-packages
 
 # ── Core (required) ───────────────────────────────────────────────────────────
-requests>=2.31.0       # HTTP queries: crt.sh, ARIN, HIBP, CISA KEV, robots.txt, favicon, JS files
-dnspython>=2.4.2       # DNS resolution, AXFR, CNAME chain analysis, SPF/DMARC/MX lookups
-rich>=13.7.0           # Terminal UI: panels, tables, progress spinners
+requests>=2.31.0          # HTTP: crt.sh, ARIN, HIBP, SecurityTrails, LeakIX, all API calls
+dnspython>=2.4.2          # DNS: resolution, AXFR, CNAME chain analysis, SPF/DMARC/DKIM queries
+rich>=13.7.0              # Terminal UI: panels, progress, color output
 
-# ── API integrations (required for full functionality) ────────────────────────
-shodan>=1.31.0         # Shodan API: SSL certs, org/ASN/IP queries, favicon hash search
-censys>=2.2.12         # Censys API: certificate and host correlation
+# ── API integrations ──────────────────────────────────────────────────────────
+shodan>=1.31.0            # Shodan API: SSL cert search, org/ASN queries, favicon hash pivoting
+                          #   Free tier: ssl cert + host lookups
+                          #   Paid tier required for: org: search, http.html: search (Phases 7, 12, 19)
+censys>=2.2.12            # Censys API: host and certificate search (Phase 2)
 
-# ── Certificate monitoring (Phase 11) ────────────────────────────────────────
-certstream>=1.11       # Real-time CT log WebSocket streaming (certstream.calidog.io)
-websocket-client>=1.6.4  # WebSocket client dependency for certstream
+# ── Certificate monitoring ────────────────────────────────────────────────────
+certstream>=1.11          # Real-time CT log streaming via WebSocket (Phase 9)
+websocket-client>=1.6.4   # WebSocket dependency for certstream
 
-# ── Favicon hash (Phase 8 -- optional but recommended) ───────────────────────
-mmh3>=4.0.0            # MurmurHash3 for Shodan-compatible favicon hash computation
-                       # Falls back to MD5 if not installed (less accurate for Shodan queries)
+# ── Favicon hash pivoting ─────────────────────────────────────────────────────
+mmh3>=3.0.0               # MurmurHash3 -- Shodan-compatible favicon hash (Phase 12)
+                          #   Falls back to MD5 if absent (less accurate for Shodan queries)
+
+# ── GUI ───────────────────────────────────────────────────────────────────────
+# tkinter is bundled with Python. No pip install needed.
+# If missing: sudo apt install python3-tk
+# Verify:     python3 -c "import tkinter; print('OK')"
+
+
+# =============================================================================
+# SYSTEM PACKAGES  (sudo apt install)
+# =============================================================================
+#
+#   python3-tk      GUI window manager (Tkinter)
+#   whois           WHOIS lookups (Phase 1)
+#   amass           Passive subdomain enumeration (Phase 3)
+#   gitleaks        Git secret scanning -- GitHub repos + JS dump (Phase 17)
+#   theharvester    Email and subdomain OSINT from search engines (Phase 15)
+#
+#   sudo apt install python3-tk whois amass gitleaks theharvester
+
+
+# =============================================================================
+# GO TOOLS  (go install -- requires: sudo apt install golang)
+# =============================================================================
+#
+#   Add Go binaries to PATH first:
+#     export PATH=$PATH:$(go env GOPATH)/bin
+#     echo 'export PATH=$PATH:$(go env GOPATH)/bin' >> ~/.zshrc
+#
+#   subfinder     Passive subdomain enumeration (Phase 3)
+#     go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+#
+#   assetfinder   Lightweight passive subdomain finder (Phase 3)
+#     go install github.com/tomnomnom/assetfinder@latest
+#
+#   waybackurls   Wayback Machine historical URL discovery (Phase 3)
+#     go install github.com/tomnomnom/waybackurls@latest
+#
+#   puredns       Mass DNS resolution via trusted public resolvers (Phases 3, 11)
+#     go install github.com/d3mondev/puredns/v2@latest
+#
+#   dnsx          DNS record enrichment and PTR sweeps (Phases 3, 10)
+#     go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+#
+#   httpx         HTTP probing, tech detection, favicon hashing (Phases 5, 12)
+#     go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+#
+#   tlsx          Bulk TLS certificate analysis (Phase 5)
+#     go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest
+#
+#   alterx        Subdomain permutation generation (Phase 11)
+#     go install github.com/projectdiscovery/alterx/cmd/alterx@latest
+#
+#   gau           Historical URL collection from Wayback/CommonCrawl/URLScan (Phase 8)
+#     go install github.com/lc/gau/v2/cmd/gau@latest
+
+
+# =============================================================================
+# STANDALONE TOOLS
+# =============================================================================
+#
+#   trufflehog    Secret detection in GitHub repos and JS file dumps (Phase 17)
+#     curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+#       | sudo sh -s -- -b /usr/local/bin
+#
+#   cloud_enum    Unauthenticated cloud storage enumeration (Phase 7)
+#     git clone https://github.com/initstring/cloud_enum ~/tools/cloud_enum
+#     pip3 install -r ~/tools/cloud_enum/requirements.txt --break-system-packages
+#     sudo ln -s ~/tools/cloud_enum/cloud_enum.py /usr/local/bin/cloud_enum
+
+
+# =============================================================================
+# VERIFICATION
+# =============================================================================
+#
+#   for tool in whois amass gitleaks theHarvester subfinder assetfinder \
+#     waybackurls puredns dnsx httpx tlsx alterx gau trufflehog cloud_enum; do
+#     command -v $tool &>/dev/null && echo "OK: $tool" || echo "MISSING: $tool"
+#   done
+#
+#   python3 -c "import tkinter, requests, dns, rich, shodan, certstream, mmh3; print('Python deps OK')"
+
+
+# =============================================================================
+# API KEYS
+# =============================================================================
+#
+#   Shodan          https://account.shodan.io
+#   Censys          https://search.censys.io/account
+#   SecurityTrails  https://securitytrails.com/app/account
+#
+#   export SHODAN_API_KEY="your_key"
+#   export CENSYS_API_ID="your_id"
+#   export CENSYS_API_SECRET="your_secret"
+#   export SECURITYTRAILS_API_KEY="your_key"
+#
+#   Or enter in the GUI under API Keys and click Save Keys.
