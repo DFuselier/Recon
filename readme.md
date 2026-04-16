@@ -1,282 +1,359 @@
-# asm_recon.py -- Light-Active Attack Surface Reconnaissance
+# ASM Enterprise v2.0
 
-**Script tier:** Light-Active Recon  
-**Based on:** Enterprise Financial Services ASM SOP v1.0  
-**Companion scripts:** `asm_active.py` (future -- port scanning, CVE testing, exploit templates)
+**Attack Surface Management -- Enterprise Financial Services**
 
-> **Written authorization required.** Even though every action here simulates normal internet
-> traffic, you are still directing reconnaissance at assets belonging to another party.
-> Ensure written authorization from an appropriate executive before use.
+Python-based external recon and ASM automation for large financial services organizations with active M&A programs. All phases produce output indistinguishable from normal internet activity. No port scanning, no exploit testing, no credential brute forcing.
 
----
-
-## Philosophy
-
-Every action in this script is indistinguishable from normal internet activity:
-
-- HTTP/S requests are identical to a browser visiting a page
-- DNS queries go through public resolvers, not the target's nameservers directly
-- No packets are crafted or sent directly to target ports
-- No credentials are tested, no vulnerabilities are exploited
-- External APIs (Shodan, Censys, crt.sh) are queried, not the target itself
-
-This makes the script appropriate for:
-- Pre-authorization reconnaissance and OSINT during deal due diligence
-- Continuous monitoring programs where a low-noise footprint matters
-- M&A day-zero assessments where authorization scope is still being defined
-- Any situation where you want actionable intelligence without generating scanner signatures in the target's logs
+**Platform:** Kali Linux (recommended) / Ubuntu 22.04+  
+**Python:** 3.9+  
+**License:** For authorized security assessment use only.
 
 ---
 
-## What Was Removed (vs asm_enterprise.py) and Why
-
-These tools are intentionally excluded and saved for `asm_active.py`:
-
-| Removed | Reason |
-|---|---|
-| **masscan** | Raw TCP SYN port scanner. Generates crafted packets with no equivalent in normal user traffic. Immediately detectable by any IDS/firewall. |
-| **nmap (all variants)** | Port scanner with service version probing and NSE scripts. Service fingerprinting sends probes specifically designed to elicit version disclosures -- not normal browser behavior. |
-| **puredns bruteforce** | Mass DNS brute-force generates thousands of queries to subdomain permutations. Produces an anomalous query volume that any DNS monitoring tool would flag. |
-| **massdns PTR bulk sweep** | Sweeps entire IP ranges with reverse-DNS queries. The volume and pattern are characteristic of a scanner, not a user. |
-| **nuclei cves/** | Actively tests target services for CVE exploitability. These templates send specific payloads that only make sense if you are trying to exploit a vulnerability. |
-| **nuclei default-logins/** | Credential brute-forcing. No interpretation as normal traffic exists. |
-| **nuclei misconfiguration/** | Many templates send intrusive probes beyond what a browser would issue -- targeted path guessing at volume. |
-| **nuclei exposed-panels/** | Enumerates admin interfaces with volume path probing. |
-| **nuclei cloud/** | Mixed -- several templates test for authenticated cloud misconfigurations. |
-
----
-
-## What Was Kept and Why
-
-| Kept | Reason |
-|---|---|
-| **crt.sh, Shodan, Censys, ARIN, ipinfo.io, RADB, Wayback, HIBP, CISA KEV** | Pure passive read-only queries to trusted third-party services. Zero contact with target infrastructure. |
-| **subfinder, amass (passive)** | Query third-party DNS aggregators and certificate databases -- no direct contact with target nameservers. |
-| **AXFR zone transfer** | Standard DNS protocol request. Any DNS client can attempt this; refusal is the expected response from properly configured servers. The attempt itself is a valid DNS message. |
-| **puredns resolve** | Resolves a list of known subdomains via public resolvers. Unlike bruteforce, this does not generate novel query names -- it simply resolves subdomains you already discovered from CT logs. |
-| **dnsx** | DNS record lookups (A, CNAME, MX, TXT, NS) via public resolvers. Identical to `dig`. |
-| **httpx** | HTTP GET requests to discovered hosts. A browser visiting a website is functionally identical. |
-| **tlsx** | TLS handshakes to HTTPS hosts. Every browser connecting to HTTPS does this. |
-| **whatweb** | HTTP requests that read response headers and body. Equivalent to curl with various User-Agent strings. |
-| **nuclei takeovers/** | Reads server response bodies to fingerprint dangling CNAME indicators. Equivalent to `curl <url>` and reading the response. |
-| **nuclei technologies/** | Fingerprints technology stack from response headers and body content. Equivalent to visiting the page and inspecting the source. |
-| **nuclei exposures/configs/** | Checks if publicly accessible config files (`.env`, `.git/config`, `phpinfo.php`) exist by making HTTP GET requests to known paths. Equivalent to `curl https://target/.env`. These files should never be publicly accessible -- their presence is the finding. |
-| **nuclei exposures/tokens/** | Reads server responses and JavaScript files for accidentally embedded secrets. Reads what the server serves to anyone. |
-| **subjack** | Makes HTTP requests to discovered subdomains to fingerprint takeover-eligible responses. Equivalent to `curl` on each subdomain. |
-| **gau** | Queries Wayback Machine, CommonCrawl, and URLScan archives for historically known URLs. These are third-party archives, not the target. |
-| **trufflehog** | Scans GitHub repos (github.com) for verified secrets. Does not contact target infrastructure. |
-| **gitleaks** | Scans GitHub repos (github.com) for secrets. Does not contact target infrastructure. |
-| **CertStream** | WebSocket connection to certstream.calidog.io (third-party). Does not contact target infrastructure. |
-| **cloud_enum / S3 HEAD checks** | HTTP HEAD/GET requests to cloud storage endpoints. These are standard web requests any internet user can make. If the bucket is publicly accessible, the HEAD request is identical to a browser loading a URL. |
-| **SPF/DMARC/DKIM analysis** | Standard DNS TXT/MX queries via public resolvers. Identical to what email servers perform on every incoming message. |
-| **robots.txt / sitemap.xml** | Standard HTTP GET requests to well-known paths. This is literally what Googlebot does. |
-| **CAA record checks** | Standard DNS query via public resolvers. |
-
----
-
-## What Was Added (vs asm_enterprise.py)
-
-| Added | Phase | What it does |
-|---|---|---|
-| **theHarvester** | 2 | OSINT aggregator: collects emails, subdomains, and hosts from search engines, LinkedIn, and DNS aggregators. Pure passive. |
-| **assetfinder** | 2 | Lightweight passive subdomain finder from certificate logs and DNS aggregators. Complements subfinder. |
-| **Google / search engine dork file** | 2 | Generates ~20+ targeted search queries per domain for manual investigation. No network requests -- offline generation. |
-| **uncover** | 5 | Aggregates Shodan, Censys, FOFA, Hunter.io, and ZoomEye simultaneously in a single query. Passive API only. |
-| **SPF / DMARC / DKIM analysis** | 3 | Checks MX records, SPF TXT records, DMARC policies, and probes common DKIM selectors. Missing DMARC or p=none is a direct spoofing enablement finding. |
-| **robots.txt + sitemap.xml fetching** | 6 | Fetches standard web files and extracts disallowed paths (often revealing hidden endpoints and admin areas) and sitemap references. |
-| **Security header analysis (inline)** | 6 | Moved from a Phase 8 dependency into Phase 6 httpx post-processing. Now runs immediately alongside liveness checks. Reports missing HSTS, CSP, X-Frame-Options, wildcard CORS. |
-| **Expiring-soon TLS cert tracking** | 6 | tlsx output now flags certs expiring within 30 days, not just expired certs. |
-| **waybackurls** | 8 | Dedicated Wayback Machine URL extractor (complements gau). |
-| **JS endpoint extraction** | 8 | Fetches publicly served JavaScript files and extracts API paths, auth endpoints, and internal service names via regex. These are paths the application itself sends to any browser. |
-| **Favicon hash + Shodan** | 8 | Computes MurmurHash3 of the target's favicon, then queries Shodan for all servers serving the identical icon. Reveals related infrastructure, acquired companies, and servers behind CDNs sharing the same codebase. |
-| **Extended CNAME targets** | 7 | Added readthedocs.io, statuspage.io, bitbucket.io, uservoice.com, feedpress.me to the dangling CNAME detection list. |
-| **Extended Shodan queries** | 5 | Added Jenkins, Jupyter Notebooks, Grafana, Prometheus, PostgreSQL, MSSQL, MySQL to the high-risk service query list. |
-| **GitHub dork file (expanded)** | 10 | Added DATABASE_URL, BEGIN OPENSSH PRIVATE KEY, and Authorization header patterns. |
-
----
-
-## Full Installation (Kali Linux)
-
-### Step 1 -- System packages
+## Quick Start
 
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y \
-    python3 python3-pip git curl wget \
-    whois amass dnsrecon whatweb gitleaks jq
-```
+# Install dependencies
+sudo apt install python3-tk whois amass gitleaks theharvester golang
+pip3 install -r requirements.txt --break-system-packages
 
-### Step 2 -- Go (required for ProjectDiscovery tools)
+# Install Go tools (requires golang)
+export PATH=$PATH:$(go env GOPATH)/bin
+echo 'export PATH=$PATH:$(go env GOPATH)/bin' >> ~/.zshrc
 
-```bash
-go version || (
-    wget https://go.dev/dl/go1.22.4.linux-amd64.tar.gz &&
-    sudo tar -C /usr/local -xzf go1.22.4.linux-amd64.tar.gz &&
-    echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc &&
-    source ~/.bashrc
-)
-```
-
-### Step 3 -- ProjectDiscovery + recon tools
-
-```bash
-# Core subdomain / DNS tools
-go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest
-go install github.com/projectdiscovery/uncover/cmd/uncover@latest
-
-# Resolution + brute-force
-go install github.com/d3mondev/puredns/v2@latest
-
-# Takeover detection
-go install github.com/haccer/subjack@latest
-
-# URL / JS collection
-go install github.com/lc/gau/v2/cmd/gau@latest
-go install github.com/tomnomnom/waybackurls@latest
-
-# Lightweight passive subdomain finder
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 go install github.com/tomnomnom/assetfinder@latest
+go install github.com/tomnomnom/waybackurls@latest
+go install github.com/d3mondev/puredns/v2@latest
+go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest
+go install github.com/projectdiscovery/alterx/cmd/alterx@latest
+go install github.com/lc/gau/v2/cmd/gau@latest
 
-# Update Nuclei templates immediately after install
-nuclei -update-templates
-
-# Verify all tools
-for tool in subfinder httpx dnsx nuclei tlsx uncover puredns subjack gau waybackurls assetfinder; do
-    which $tool && echo "OK: $tool" || echo "MISSING: $tool"
-done
-```
-
-### Step 4 -- theHarvester
-
-```bash
-pip3 install theHarvester
-# or for latest:
-git clone https://github.com/laramies/theHarvester /opt/theHarvester
-cd /opt/theHarvester && pip3 install -r requirements/base.txt
-ln -s /opt/theHarvester/theHarvester.py /usr/local/bin/theHarvester
-```
-
-### Step 5 -- cloud_enum
-
-```bash
-git clone https://github.com/initstring/cloud_enum /opt/cloud_enum
-pip3 install -r /opt/cloud_enum/requirements.txt
-ln -s /opt/cloud_enum/cloud_enum.py /usr/local/bin/cloud_enum
-chmod +x /opt/cloud_enum/cloud_enum.py
-```
-
-### Step 6 -- trufflehog
-
-```bash
+# TruffleHog
 curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
   | sudo sh -s -- -b /usr/local/bin
-trufflehog --version
-```
 
-### Step 7 -- Python dependencies
+# cloud_enum
+git clone https://github.com/initstring/cloud_enum ~/tools/cloud_enum
+pip3 install -r ~/tools/cloud_enum/requirements.txt --break-system-packages
+sudo ln -s ~/tools/cloud_enum/cloud_enum.py /usr/local/bin/cloud_enum
 
-```bash
-pip3 install -r requirements.txt
+# Launch GUI
+python3 asm_gui.py
 
-# Verify key imports
-python3 -c "import requests, dns, rich, shodan, censys, certstream, mmh3; print('All OK')"
+# Or run CLI interactively
+python3 asm_enterprise.py
 ```
 
 ---
 
-## API Key Setup
+## Files
 
-```bash
-# Add to ~/.bashrc or ~/.zshrc
-export SHODAN_API_KEY="your_key_here"
-export CENSYS_API_ID="your_id_here"
-export CENSYS_API_SECRET="your_secret_here"
+| File | Purpose |
+|---|---|
+| `asm_enterprise.py` | Core scan engine -- 19 phases, CLI + GUI subprocess mode |
+| `asm_gui.py` | Tkinter GUI -- phase selection, live log, progress bar, API key management |
+| `requirements.txt` | Python dependencies |
 
-source ~/.bashrc
-```
+Both files must be in the same directory.
 
-| API | URL | Notes |
+---
+
+## API Keys
+
+| Service | Where to get | Required for |
 |---|---|---|
-| Shodan | https://account.shodan.io | Free tier usable; paid plan for full org/ASN data |
-| Censys | https://search.censys.io/account | Free research API available |
+| Shodan | account.shodan.io | Phases 2, 7, 12, 19 |
+| Censys | search.censys.io/account | Phase 2 |
+| SecurityTrails | securitytrails.com/app/account | Phase 14 |
 
----
-
-## Usage
+Keys can be set via environment variables or entered in the GUI. The GUI saves keys to `~/.asm_config.json` (chmod 600).
 
 ```bash
-python3 asm_recon.py
+export SHODAN_API_KEY="your_key"
+export CENSYS_API_ID="your_id"
+export CENSYS_API_SECRET="your_secret"
+export SECURITYTRAILS_API_KEY="your_key"
 ```
 
-At startup you will confirm authorization, then enter:
-
-- **Root domains** -- e.g. `target.com,subsidiary.com`
-- **IP/CIDR ranges** -- e.g. `203.0.113.0/24` (or ENTER to skip)
-- **Organization name** -- exact string as in WHOIS/certs
-- **ASN** -- e.g. `AS12345`
-- **GitHub org handle** -- for trufflehog/gitleaks secret scanning
-- **API keys** -- Shodan, Censys (or pre-set via env vars)
-
-Phase menu options:
-- `all` -- run every phase
-- `1,2,7` -- run specific phases
-- `info` -- show what cannot be automated
-- `removed` -- show what was removed (saved for asm_active.py)
-- `added` -- show what was added vs asm_enterprise.py
-
-### M&A Day-Zero Passive-Only Run
-
-For pre-authorization recon (before active scanning is approved):
-
-```
-Select phases: 1,2,3,5,10,11
-```
-
-Phases 1, 2, 5, 10, and 11 are entirely passive third-party API queries.
-Phase 3 includes AXFR and puredns resolve -- if you want to skip those, just
-run `1,2,5,10,11` for pure passive.
+**Shodan plan note:** Free/dev tier keys cannot run `org:` or `http.html:` search queries -- these return 403. SSL cert and host lookups work on free tier. Phases 7, 12, and 19 require a paid plan for full functionality. Use the "Test Keys" button in the GUI to check your plan level.
 
 ---
 
-## Phase Reference
+## Phases
 
-| # | Phase | Primary Tools | Key Output Files |
+All phases produce output that is indistinguishable from normal internet traffic. No packets are crafted, no services are fingerprinted with scanner signatures, no credentials are tested.
+
+| # | Phase | Mode | Key Tools |
 |---|---|---|---|
-| 1 | Seed Data | whois, ARIN API, ipinfo.io, RADB, Wayback | `seed_data.json`, `asn_prefixes.txt` |
-| 2 | CT & OSINT | crt.sh, Censys, Shodan, theHarvester, assetfinder | `ct_subdomains.txt`, `search_engine_dorks.txt` |
-| 3 | DNS | subfinder, amass, AXFR, puredns, dnsx, SPF/DMARC | `resolved_subdomains.txt`, `email_security_analysis.json` |
-| 4 | IP & ASN | ipinfo.io, Shodan, PTR lookups | `all_ips.txt`, `ptr_results.txt` |
-| 5 | Passive Intel | Shodan, Censys, uncover | `shodan_*.json`, `uncover_*.txt` |
-| 6 | Validation | httpx, tlsx, robots.txt, CAA, security headers | `httpx_results.json`, `cert_findings.json`, `header_analysis.json` |
-| 7 | Takeovers | nuclei takeovers/, subjack, CNAME analysis | `nuclei_takeovers.txt`, `dangling_cnames.json` |
-| 8 | Fingerprint | whatweb, nuclei tech/configs, gau, waybackurls, JS, favicon | `nuclei_exposed_configs.txt`, `js_endpoints_*.txt`, `favicon_hash_findings.json` |
-| 9 | Cloud | cloud_enum, S3 HEAD, Shodan cloud | `s3_findings.json`, `cloud_enum_results.txt` |
-| 10 | Leaks | trufflehog, gitleaks, HIBP, CISA KEV, nuclei tokens | `trufflehog_*.json`, `hibp_*.json`, `cisa_kev.json` |
-| 11 | CertStream | certstream.calidog.io WebSocket | `cert_alerts.jsonl` |
+| 1 | Seed Data Collection | mixed | whois, ARIN, ipinfo.io, RADB, Wayback CDX |
+| 2 | CT & Passive Recon | mixed | crt.sh, Censys API, Shodan SSL/org |
+| 3 | Active DNS Enumeration | mixed | subfinder, amass, assetfinder, waybackurls, AXFR, puredns, dnsx |
+| 4 | IP & ASN Mapping | mixed | CIDR expansion, A record resolution, RADB, Shodan org IPs |
+| 5 | Web Validation & TLS | mixed | httpx, tlsx, robots.txt, sitemap, CORS, server version analysis |
+| 6 | CNAME Dangling Analysis | **PASSIVE** | Python dnspython -- public resolvers only |
+| 7 | Cloud Asset Enumeration | mixed | cloud_enum, S3 HEAD probes, Shodan cloud queries |
+| 8 | JS Collection, Endpoints & Secret Scanning | mixed | gau, inline regex, Shannon entropy, JS dump for Phase 17 |
+| 9 | Certificate Monitoring | mixed | CertStream real-time CT WebSocket |
+| 10 | Reverse PTR Sweeps | **PASSIVE** | dnsx -ptr |
+| 11 | DNS Permutation | **PASSIVE** | alterx, puredns |
+| 12 | Favicon Hash Pivoting | **PASSIVE** | httpx -favicon, Shodan http.favicon.hash |
+| 13 | DMARC / SPF / DKIM | **PASSIVE** | dnspython -- pure DNS queries |
+| 14 | Historical DNS | **PASSIVE** | SecurityTrails API |
+| 15 | Email Harvesting | **PASSIVE** | theHarvester (15 passive sources) |
+| 16 | Paste Site Monitoring | **PASSIVE** | GitHub code search, LeakIX, Pastebin dork |
+| 17 | Credential & Leak Monitoring | mixed | trufflehog (GitHub + JS dump), gitleaks, HIBP, dork file |
+| 18 | Reverse Whois | **PASSIVE** | viewdns.info, reversewhois.io, amass intel -whois |
+| 19 | Digital Footprint & Shadow Assets | **PASSIVE** | Tracker ID pivoting, Shodan copyright/html search |
+
+### Phase selection shortcuts
+
+| Input | Runs |
+|---|---|
+| `all` | All 19 phases |
+| `passive` | Phases 1, 2, 4, 6, 10-16, 18, 19 -- safe for M&A pre-authorization |
+| `1,3,8` | Specific phases (comma-separated) |
+| `info` | Show what cannot be automated and why |
+
+### Phase dependencies
+
+For best results, run phases in order. Key dependencies:
+
+- Phase 6 (CNAME) needs Phase 3 subdomain output
+- Phase 8 (JS) should run before Phase 17 (leaks) -- Phase 17 scans Phase 8's JS dump with trufflehog/gitleaks filesystem mode
+- Phase 10 (PTR) needs Phase 4 IP output
+- Phase 11 (permutation) needs Phase 3 subdomain output
+- Phase 12 (favicon) uses Phase 5 httpx output if available
+- Phase 17 (leaks) checks for Phase 8 JS dump and runs filesystem secret scan if present
 
 ---
 
-## What asm_active.py Will Add
+## Output Structure
 
-The following capabilities are intentionally excluded from this script and will be implemented in `asm_active.py` (future). They require explicit written authorization and should be disclosed in your scope of work agreement:
+All output is written to a timestamped directory: `output/<domain>_<YYYYMMDD_HHMMSS>/`
 
-- **masscan** -- full-range TCP SYN port sweeps
-- **nmap** -- service version detection, NSE scripts, TLS cipher analysis, SMB vuln checks
-- **puredns bruteforce** -- mass DNS subdomain brute-force
-- **massdns PTR** -- bulk reverse-DNS sweeps across owned IP ranges
-- **nuclei cves/** -- CVE-specific exploit testing
-- **nuclei default-logins/** -- credential brute-forcing on discovered services
-- **nuclei misconfiguration/** -- targeted misconfiguration testing templates
-- **nuclei exposed-panels/** -- admin panel enumeration at volume
-- **Authenticated cloud posture** -- ScoutSuite, Prowler (requires cloud credentials)
+```
+output/target.com_20260416_120000/
+  SUMMARY_REPORT.json          # High-level findings summary
+  resolvers.txt                # Trusted DNS resolvers used
+  phase1_seed/
+    seed_data.json
+    whois_*.txt
+    arin_search.json
+    asn_*_ipinfo.json
+    wayback_subdomains_*.txt
+  phase2_ct/
+    crtsh_*.json
+    ct_subdomains.txt          # KEY: all unique subdomains from CT logs
+    censys_hosts_*.json
+    shodan_ssl_*.json
+  phase3_dns/
+    AXFR_SUCCESS_*.txt         # P0: zone transfer succeeded
+    subfinder_*.txt
+    amass_*.txt
+    assetfinder_*.txt
+    waybackurls_*.txt
+    all_subdomains_raw.txt
+    resolved_subdomains.txt    # KEY: live subdomains after puredns resolution
+    dnsx_resolved.json
+  phase4_ip/
+    all_ips.txt
+    shodan_org_ips.txt
+  phase5_validation/
+    httpx_results.json         # KEY: all live web hosts + metadata
+    live_hosts.txt
+    auth_interfaces.txt
+    cors_wildcard.txt          # CRITICAL if populated: wildcard CORS
+    server_version_disclosure.json
+    tlsx_results.json
+    cert_findings.json         # Expired/expiring/self-signed/LE certs
+    robots_sitemap_findings.json
+  phase6_cname/
+    dangling_cnames.json       # P0 if NXDOMAIN entries present
+    dangling_cnames_summary.txt
+  phase7_cloud/
+    bucket_permutations.txt
+    cloud_enum_results.txt
+    s3_findings.json           # CRITICAL if public:true entries present
+    shodan_docker_api.json
+    shodan_kubernetes.json
+  phase8_js/
+    gau_js_*.txt
+    js_endpoints.txt           # Extracted API paths
+    js_endpoints_high_value.txt
+    js_secrets.json            # KEY: pattern + entropy secret hits in JS
+    dump/                      # Raw JS files -- scanned by Phase 17
+  phase9_certstream/
+    cert_alerts.jsonl          # Append-only CT event log
+  phase10_ptr/
+    ptr_results.json
+    ptr_new_hosts.txt
+  phase11_permutation/
+    alterx_permutations.txt
+    permutation_new_hosts.txt
+  phase12_favicon/
+    favicon_hashes.json
+    favicon_pivot_results.json
+    favicon_novel_ips.txt      # IPs outside scope sharing your favicon
+  phase13_email_security/
+    email_security_findings.json
+  phase14_historical_dns/
+    st_full_*.json
+    st_new_subdomains_*.txt
+    historical_ips_*.txt       # Review for CDN/Cloudflare origin IP bypass
+  phase15_email_harvest/
+    harvested_emails.txt
+    external_domain_emails.txt
+  phase16_pastes/
+    paste_hits_summary.json
+    pastebin_urls_*.txt
+    leakix_*.json
+    dehashed_manual_links.txt
+  phase17_leaks/
+    trufflehog_*.json          # Verified secrets in GitHub repos
+    trufflehog_js_dump.json    # Secrets found in Phase 8 JS files
+    gitleaks_report.json
+    gitleaks_js_dump.json
+    hibp_*.json
+    search_dorks.txt           # Manual Google/GitHub dork queries
+  phase18_reverse_whois/
+    reverse_whois_domains.txt
+    reverse_whois_summary.json
+  phase19_digital_footprint/
+    tracker_ids_found.json
+    shodan_copyright_*.json
+    digital_footprint_findings.json
+    novel_ips_from_footprint.txt
+  debug.log                    # Present only when --debug flag is used
+```
 
 ---
 
-## Legal Reminder
+## Escalation Priorities
 
-Use only against assets you own or have explicit written authorization to test.
-Unauthorized reconnaissance may violate the CFAA and equivalent laws in your jurisdiction.
+### P0 -- Remediate within 24 hours
+
+| Finding | Location |
+|---|---|
+| `AXFR_SUCCESS_*.txt` exists | `phase3_dns/` -- DNS zone transfer allowed |
+| `dangling_cnames.json` contains NXDOMAIN entries | `phase6_cname/` -- active subdomain takeover risk |
+| `s3_findings.json` contains `"public": true` | `phase7_cloud/` -- public S3 bucket |
+| `js_secrets.json` contains pattern-matched credentials | `phase8_js/` -- live keys in public JS |
+| `trufflehog_*.json` contains verified secrets | `phase17_leaks/` -- confirmed live secrets in GitHub |
+
+### P1 -- Remediate within 7 days
+
+| Finding | Location |
+|---|---|
+| `cors_wildcard.txt` populated | `phase5_validation/` -- wildcard CORS on financial API |
+| `cert_findings.json` contains expired certs | `phase5_validation/` |
+| `hibp_*.json` shows recent breach | `phase17_leaks/` |
+| `historical_ips_*.txt` shows CDN origin IP | `phase14_historical_dns/` -- Cloudflare bypass risk |
+
+### P2 -- Include in next sprint
+
+| Finding | Location |
+|---|---|
+| `email_security_findings.json` -- DMARC p=none or missing | `phase13_email_security/` |
+| `server_version_disclosure.json` populated | `phase5_validation/` |
+| `reverse_whois_domains.txt` has unknown domains | `phase18_reverse_whois/` |
+| `novel_ips_from_footprint.txt` populated | `phase19_digital_footprint/` -- shadow IT |
+
+---
+
+## M&A Pre-Acquisition Workflow
+
+Before acquiring a company, run passive phases only. No active requests reach the target.
+
+```
+Select phases: passive
+```
+
+This runs phases: 1, 2, 4, 6, 10, 11, 12, 13, 14, 15, 16, 18, 19
+
+Do **not** run phases 3, 5, 7, 8, 9, 17 against an acquisition target without explicit CISO authorization from the target organization. The deal does not grant you that right automatically.
+
+After deal close and CISO authorization, run the full suite:
+
+```
+Select phases: all
+```
+
+---
+
+## CLI Mode
+
+The script can be run without the GUI:
+
+```bash
+# Interactive mode -- prompts for all inputs
+python3 asm_enterprise.py
+
+# Non-interactive mode -- used by the GUI, also useful for scripting
+python3 asm_enterprise.py \
+  --config /path/to/config.json \
+  --phases 1,2,3,6,8 \
+  --non-interactive \
+  --no-color
+
+# With debug logging
+python3 asm_enterprise.py --debug
+```
+
+### Config JSON format (for --config)
+
+```json
+{
+  "domains":            ["target.com", "subsidiary.com"],
+  "ip_ranges":          ["203.0.113.0/24"],
+  "org_name":           "Target Corporation",
+  "asn":                "AS12345",
+  "github_org":         "targetcorp",
+  "shodan_key":         "your_key",
+  "censys_id":          "your_id",
+  "censys_secret":      "your_secret",
+  "securitytrails_key": "your_key",
+  "output_dir":         ""
+}
+```
+
+Leave `output_dir` blank to auto-name the output directory.
+
+---
+
+## Not Automated
+
+The following capabilities are intentionally excluded:
+
+| Capability | Reason |
+|---|---|
+| Port scanning (masscan, nmap) | Generates crafted packets -- reserved for `asm_active.py` |
+| CVE / default-login testing (nuclei) | Exploit-adjacent probing -- reserved for `asm_active.py` |
+| Third-party / supply chain assessment | Requires internal vendor lists not externally discoverable |
+| M&A pre-acquisition active phases | Requires explicit CISO authorization from target |
+| Dark web / Flashpoint monitoring | Enterprise license required |
+| Authenticated cloud posture (ScoutSuite/Prowler) | Requires provisioned cloud credentials |
+
+---
+
+## Regulatory Alignment
+
+Findings from this tool map directly to requirements under:
+
+| Regulation | Relevant Phases |
+|---|---|
+| NY DFS Part 500 | 5 (TLS), 6 (takeover), 13 (DMARC/SPF), 17 (credential leaks) |
+| FFIEC CAT | 2, 3, 5, 6, 7, 8, 17 |
+| PCI-DSS 12.3 | 3, 5, 6, 7 |
+| GLBA Safeguards Rule | 2, 13, 17, 18 |
+| DORA (EU) | 2, 5, 6, 7, 14, 18 |
+
+---
+
+## Legal
+
+This tool is for authorized security assessments only. Unauthorized use against systems you do not own or do not have explicit written authorization to test may violate the Computer Fraud and Abuse Act (CFAA), the UK Computer Misuse Act, GDPR Article 32, and equivalent laws in your jurisdiction.
+
+Written authorization from an appropriate executive (CISO, CTO, or legal counsel) is required before running any phase against any target.
